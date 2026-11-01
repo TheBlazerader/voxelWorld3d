@@ -62,6 +62,7 @@ function cleanPlayer(player) {
     return {
         id: player.id,
         name: player.name,
+        color: player.color,
         position: player.position,
         yaw: player.yaw
     };
@@ -126,12 +127,14 @@ wss.on('connection', socket => {
                 .replace(/[<>\u0000-\u001f]/g, '')
                 .trim()
                 .slice(0, 20) || 'Player';
+            const color = /^#[0-9a-fA-F]{6}$/.test(message.color || '') ? message.color : '#3d83d5';
             const spawnIndex = players.size;
             const spawnX = ((spawnIndex % 7) - 3) * 2 + 0.5;
             const spawnZ = (Math.floor(spawnIndex / 7) - 1) * 2 + 0.5;
             const player = {
                 id,
                 name,
+                color,
                 position: { x: spawnX, y: 30, z: spawnZ },
                 yaw: 0
             };
