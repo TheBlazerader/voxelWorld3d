@@ -1,0 +1,13 @@
+{
+  "name": "voxel-world-multiplayer-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Separate WebSocket multiplayer server for Voxel World",
+  "main": "Voxel_World_Multiplayer_Server.js",
+  "scripts": {
+    "start": "node Voxel_World_Multiplayer_Server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
