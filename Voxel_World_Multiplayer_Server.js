@@ -146,6 +146,8 @@ wss.on('connection', socket => {
                 yaw: 0,
                 crouching: false,
                 health: MAX_HEALTH,
+                spawn: { x: spawnX, z: spawnZ },
+                respawnAt: 0,
                 lastPunchAt: 0,
                 lastHealthRegenAt: Date.now()
             };
@@ -193,10 +195,10 @@ wss.on('connection', socket => {
 
         if (message.type === 'punch') {
             const now = Date.now();
-            if (now - player.lastPunchAt < PUNCH_COOLDOWN_MS) return;
+            if (player.health <= 0 || player.respawnAt || now - player.lastPunchAt < PUNCH_COOLDOWN_MS) return;
             if (typeof message.targetId !== 'string' || message.targetId === player.id) return;
             const target = players.get(message.targetId);
-            if (!target || target.health <= 0) return;
+            if (!target || target.health <= 0 || target.respawnAt) return;
 
             const dx = target.position.x - player.position.x;
             const dz = target.position.z - player.position.z;
@@ -212,6 +214,7 @@ wss.on('connection', socket => {
             player.lastPunchAt = now;
             target.health = Math.max(0, target.health - PUNCH_DAMAGE);
             target.lastHealthRegenAt = now;
+            if (target.health <= 0) target.respawnAt = now + 3000;
             broadcast({
                 type: 'health_update',
                 id: target.id,
@@ -277,7 +280,26 @@ wss.on('close', () => clearInterval(heartbeat));
 const healthRegenTimer = setInterval(() => {
     const now = Date.now();
     for (const player of players.values()) {
-        if (player.health >= MAX_HEALTH || now - player.lastHealthRegenAt < HEALTH_REGEN_INTERVAL_MS) continue;
+        if (player.respawnAt) {
+            if (now < player.respawnAt) continue;
+            player.respawnAt = 0;
+            player.health = MAX_HEALTH;
+            player.position = { x: player.spawn.x, y: 30, z: player.spawn.z };
+            player.yaw = 0;
+            player.crouching = false;
+            player.lastHealthRegenAt = now;
+            broadcast({
+                type: 'health_update',
+                id: player.id,
+                health: MAX_HEALTH,
+                respawn: true,
+                spawn: player.spawn,
+                attackerId: null
+            });
+            broadcast({ type: 'player_state', player: cleanPlayer(player) });
+            continue;
+        }
+        if (player.health <= 0 || player.health >= MAX_HEALTH || now - player.lastHealthRegenAt < HEALTH_REGEN_INTERVAL_MS) continue;
         player.health = Math.min(MAX_HEALTH, player.health + 1);
         player.lastHealthRegenAt = now;
         broadcast({
