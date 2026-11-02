@@ -206,8 +206,11 @@ wss.on('connection', socket => {
             const verticalDistance = Math.abs(target.position.y - player.position.y);
             if (distance > PUNCH_REACH || verticalDistance > 2.4 || distance < 0.001) return;
 
-            const forwardX = -Math.sin(player.yaw);
-            const forwardZ = -Math.cos(player.yaw);
+            // Use the yaw sent with the punch so a very recent camera turn
+            // is not rejected while waiting for the next periodic state update.
+            const punchYaw = Number.isFinite(message.yaw) ? message.yaw : player.yaw;
+            const forwardX = -Math.sin(punchYaw);
+            const forwardZ = -Math.cos(punchYaw);
             const facing = (dx / distance) * forwardX + (dz / distance) * forwardZ;
             if (facing < 0.35) return;
 
