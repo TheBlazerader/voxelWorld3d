@@ -1,3 +1,8 @@
+// Voxel World Multiplayer Server
+// Deploy as a separate Render Web Service from the Ramp Rush server.
+// Build command: npm install
+// Start command: node Voxel_World_Multiplayer_Server.js
+
 const http = require('http');
 const WebSocket = require('ws');
 const { randomUUID } = require('crypto');
@@ -9,6 +14,11 @@ const WORLD_BOTTOM = 0;
 const MAX_PLAYERS = 32;
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_EDITS = 100000;
+const MAX_HEALTH = 20;
+const PUNCH_DAMAGE = 2;
+const PUNCH_REACH = 3.2;
+const PUNCH_COOLDOWN_MS = 500;
+const HEALTH_REGEN_INTERVAL_MS = 4000;
 
 function createSeed() {
     return (Math.floor(Math.random() * 2147483646) + 1) >>> 0;
@@ -19,19 +29,8 @@ const worldEdits = new Map();
 const players = new Map();
 
 const server = http.createServer((req, res) => {
-    // Allow the game page to call /health before opening its WebSocket.
-    // This HTTP request wakes a sleeping Render service.
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-        res.writeHead(204);
-        return res.end();
-    }
-
-    if ((req.url === '/health' || req.url === '/') && req.method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    if (req.url === '/health' || req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({
             service: 'Voxel World Multiplayer Server',
             status: 'ok',
@@ -71,8 +70,8 @@ function cleanPlayer(player) {
         color: player.color,
         position: player.position,
         yaw: player.yaw,
-        crouching: player.crouching === true,
-        health: player.health
+        crouching: !!player.crouching,
+        health: Number.isFinite(player.health) ? player.health : MAX_HEALTH
     };
 }
 
@@ -146,9 +145,9 @@ wss.on('connection', socket => {
                 position: { x: spawnX, y: 30, z: spawnZ },
                 yaw: 0,
                 crouching: false,
-                health: 20,
-                lastRegenAt: Date.now(),
-                lastPunchAt: 0
+                health: MAX_HEALTH,
+                lastPunchAt: 0,
+                lastHealthRegenAt: Date.now()
             };
             socket.playerId = id;
             players.set(id, { ...player, socket });
@@ -156,8 +155,8 @@ wss.on('connection', socket => {
             send(socket, {
                 type: 'welcome',
                 id,
-                health: player.health,
                 seed: worldSeed,
+                health: player.health,
                 edits: Array.from(worldEdits.values()),
                 players: Array.from(players.values())
                     .filter(other => other.id !== id)
@@ -187,30 +186,38 @@ wss.on('connection', socket => {
                 z: message.position.z
             };
             player.yaw = Number.isFinite(message.yaw) ? message.yaw : 0;
-            player.crouching = message.crouching === true;
+            player.crouching = !!message.crouching;
             broadcast({ type: 'player_state', player: cleanPlayer(player) }, socket);
             return;
         }
 
         if (message.type === 'punch') {
             const now = Date.now();
-            const target = players.get(String(message.targetId || ''));
-            if (!target || target.id === player.id || now - player.lastPunchAt < 500) return;
+            if (now - player.lastPunchAt < PUNCH_COOLDOWN_MS) return;
+            if (typeof message.targetId !== 'string' || message.targetId === player.id) return;
+            const target = players.get(message.targetId);
+            if (!target || target.health <= 0) return;
+
             const dx = target.position.x - player.position.x;
             const dz = target.position.z - player.position.z;
-            const horizontalDistance = Math.hypot(dx, dz);
-            const attackerFeet = player.position.y - (player.crouching ? 1.3 : 1.8);
-            const targetFeet = target.position.y - (target.crouching ? 1.3 : 1.8);
-            const verticalDistance = Math.abs((attackerFeet + 1.0) - (targetFeet + 0.9));
-            const length = horizontalDistance || 1;
+            const distance = Math.hypot(dx, dz);
+            const verticalDistance = Math.abs(target.position.y - player.position.y);
+            if (distance > PUNCH_REACH || verticalDistance > 2.4 || distance < 0.001) return;
+
             const forwardX = -Math.sin(player.yaw);
             const forwardZ = -Math.cos(player.yaw);
-            const facingDot = (dx / length) * forwardX + (dz / length) * forwardZ;
-            if (horizontalDistance > 3.2 || verticalDistance > 1.8 || facingDot < 0.2) return;
+            const facing = (dx / distance) * forwardX + (dz / distance) * forwardZ;
+            if (facing < 0.35) return;
+
             player.lastPunchAt = now;
-            target.health = Math.max(0, target.health - 2);
-            target.lastRegenAt = now;
-            broadcast({ type: 'player_health', id: target.id, health: target.health });
+            target.health = Math.max(0, target.health - PUNCH_DAMAGE);
+            target.lastHealthRegenAt = now;
+            broadcast({
+                type: 'health_update',
+                id: target.id,
+                health: target.health,
+                attackerId: player.id
+            });
             return;
         }
 
@@ -254,17 +261,6 @@ wss.on('connection', socket => {
     });
 });
 
-const healthRegeneration = setInterval(() => {
-    const now = Date.now();
-    for (const player of players.values()) {
-        if (player.health < 20 && now - player.lastRegenAt >= 4000) {
-            player.health = Math.min(20, player.health + 1);
-            player.lastRegenAt = now;
-            broadcast({ type: 'player_health', id: player.id, health: player.health });
-        }
-    }
-}, 500);
-
 const heartbeat = setInterval(() => {
     for (const socket of wss.clients) {
         if (socket.isAlive === false) {
@@ -276,7 +272,24 @@ const heartbeat = setInterval(() => {
     }
 }, 30000);
 
-wss.on('close', () => { clearInterval(heartbeat); clearInterval(healthRegeneration); });
+wss.on('close', () => clearInterval(heartbeat));
+
+const healthRegenTimer = setInterval(() => {
+    const now = Date.now();
+    for (const player of players.values()) {
+        if (player.health >= MAX_HEALTH || now - player.lastHealthRegenAt < HEALTH_REGEN_INTERVAL_MS) continue;
+        player.health = Math.min(MAX_HEALTH, player.health + 1);
+        player.lastHealthRegenAt = now;
+        broadcast({
+            type: 'health_update',
+            id: player.id,
+            health: player.health,
+            attackerId: null
+        });
+    }
+}, 250);
+
+server.on('close', () => clearInterval(healthRegenTimer));
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Voxel World multiplayer server listening on port ${PORT}`);
