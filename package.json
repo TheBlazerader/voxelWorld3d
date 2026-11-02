@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "Separate WebSocket multiplayer server for Voxel World",
-  "main": "Voxel_World_Multiplayer_Server.js",
+  "main": "Voxel_World_Multiplayer_Server_Combat_Crouch.js",
   "scripts": {
-    "start": "node Voxel_World_Multiplayer_Server.js"
+    "start": "node Voxel_World_Multiplayer_Server_Combat_Crouch.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
