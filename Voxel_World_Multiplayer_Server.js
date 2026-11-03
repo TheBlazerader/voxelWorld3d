@@ -92,7 +92,7 @@ function validEdit(message) {
         message.x >= -HALF_WORLD && message.x < HALF_WORLD &&
         message.z >= -HALF_WORLD && message.z < HALF_WORLD &&
         message.y >= WORLD_BOTTOM && message.y <= 40 &&
-        [0, 1, 2, 4, 5].includes(message.block);
+        [0, 1, 2, 3, 4, 5].includes(message.block);
 }
 
 function sendSync(socket) {
@@ -224,6 +224,7 @@ wss.on('connection', socket => {
                 health: target.health,
                 attackerId: player.id
             });
+            broadcast({ type: 'player_punched', targetId: target.id });
             return;
         }
 
