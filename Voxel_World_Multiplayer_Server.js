@@ -15,10 +15,13 @@ const MAX_PLAYERS = 32;
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_EDITS = 100000;
 const MAX_HEALTH = 20;
-const PUNCH_DAMAGE = 2;
+const PUNCH_DAMAGE = 1; // Half a heart per hit
 const PUNCH_REACH = 3.2;
 const PUNCH_COOLDOWN_MS = 500;
 const HEALTH_REGEN_INTERVAL_MS = 4000;
+const PIG_COUNT = 14;
+const PIG_MAX_HEALTH = 10;
+const PIG_PUNCH_DAMAGE = 1;
 
 function createSeed() {
     return (Math.floor(Math.random() * 2147483646) + 1) >>> 0;
@@ -27,6 +30,7 @@ function createSeed() {
 const worldSeed = createSeed();
 const worldEdits = new Map();
 const players = new Map();
+const pigHealth = new Map();
 
 const server = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/') {
@@ -99,7 +103,8 @@ function sendSync(socket) {
     send(socket, {
         type: 'sync',
         seed: worldSeed,
-        edits: Array.from(worldEdits.values())
+        edits: Array.from(worldEdits.values()),
+        pigHealth: Array.from(pigHealth.entries())
     });
 }
 
@@ -160,6 +165,7 @@ wss.on('connection', socket => {
                 seed: worldSeed,
                 health: player.health,
                 edits: Array.from(worldEdits.values()),
+                pigHealth: Array.from(pigHealth.entries()),
                 players: Array.from(players.values())
                     .filter(other => other.id !== id)
                     .map(cleanPlayer),
@@ -225,6 +231,34 @@ wss.on('connection', socket => {
                 attackerId: player.id
             });
             broadcast({ type: 'player_punched', targetId: target.id });
+            return;
+        }
+
+        if (message.type === 'pig_punch') {
+            const now = Date.now();
+            if (player.health <= 0 || player.respawnAt || now - player.lastPunchAt < PUNCH_COOLDOWN_MS) return;
+            if (typeof message.pigId !== 'string') return;
+            const match = /^pig-(\d+)$/.exec(message.pigId);
+            if (!match || Number(match[1]) < 0 || Number(match[1]) >= PIG_COUNT) return;
+            const position = message.position;
+            if (!isFinitePosition(position)) return;
+            const dx = position.x - player.position.x;
+            const dz = position.z - player.position.z;
+            const horizontalDistance = Math.hypot(dx, dz);
+            const verticalDistance = Math.abs((player.position.y - 1.7) - (position.y + 0.7));
+            if (horizontalDistance > PUNCH_REACH + 0.5 || verticalDistance > 2.8) return;
+
+            const currentHealth = pigHealth.has(message.pigId) ? pigHealth.get(message.pigId) : PIG_MAX_HEALTH;
+            if (currentHealth <= 0) return;
+            player.lastPunchAt = now;
+            const nextHealth = Math.max(0, currentHealth - PIG_PUNCH_DAMAGE);
+            pigHealth.set(message.pigId, nextHealth);
+            broadcast({
+                type: 'pig_hit',
+                pigId: message.pigId,
+                health: nextHealth,
+                attackerId: player.id
+            });
             return;
         }
 
