@@ -323,7 +323,8 @@ wss.on('connection', socket => {
                 vx: Number.isFinite(message.vx) ? message.vx : 0,
                 vz: Number.isFinite(message.vz) ? message.vz : 0,
                 createdAt: now,
-                pickupAvailableAt: now + 850
+                playerDropped: message.playerDropped === true,
+                pickupAvailableAt: now + (message.playerDropped === true ? 850 : 0)
             };
             itemDrops.set(drop.id, drop);
             broadcast({ type: 'item_drop_spawn', drop });
@@ -331,15 +332,30 @@ wss.on('connection', socket => {
         }
 
         if (message.type === 'item_pickup_request') {
-            if (typeof message.id !== 'string' || player.health <= 0 || player.respawnAt) return;
+            if (typeof message.id !== 'string' || player.health <= 0 || player.respawnAt) {
+                send(socket, { type: 'item_pickup_rejected', id: message.id });
+                return;
+            }
             const drop = itemDrops.get(message.id);
-            if (!drop || Date.now() < drop.pickupAvailableAt) return;
-            // Project the same short, damped throw used by clients before checking pickup range.
+            if (!drop) {
+                send(socket, { type: 'item_pickup_rejected', id: message.id });
+                return;
+            }
+            if (Date.now() < drop.pickupAvailableAt) {
+                send(socket, { type: 'item_pickup_rejected', id: message.id });
+                return;
+            }
+            // Use the server's damped throw projection and a forgiving range so
+            // small player-state/network timing differences do not strand pickups.
             const elapsed = Math.max(0, (Date.now() - (drop.createdAt || Date.now())) / 1000);
             const travel = (1 - Math.exp(-3 * elapsed)) / 3;
             const dropX = drop.x + (drop.vx || 0) * travel;
             const dropZ = drop.z + (drop.vz || 0) * travel;
-            if (Math.hypot(dropX - player.position.x, dropZ - player.position.z) > 2.6) return;
+            if (Math.hypot(dropX - player.position.x, dropZ - player.position.z) > 3.25) {
+                send(socket, { type: 'item_pickup_rejected', id: message.id });
+                return;
+            }
+            // Delete before broadcasting: only the first valid request can win.
             itemDrops.delete(drop.id);
             broadcast({
                 type: 'item_drop_removed',
