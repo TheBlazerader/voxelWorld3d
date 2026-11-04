@@ -32,6 +32,10 @@ const worldEdits = new Map();
 const players = new Map();
 const pigHealth = new Map();
 const chestStates = new Map();
+const itemDrops = new Map();
+const MAX_ITEM_DROPS = 2000;
+const ITEM_DROP_TYPES = new Set([1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 24, 25,
+    30, 31, 32, 33, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]);
 
 const server = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/') {
@@ -106,7 +110,8 @@ function sendSync(socket) {
         seed: worldSeed,
         edits: Array.from(worldEdits.values()),
         pigHealth: Array.from(pigHealth.entries()),
-        chests: Array.from(chestStates.entries())
+        chests: Array.from(chestStates.entries()),
+        itemDrops: Array.from(itemDrops.values())
     });
 }
 
@@ -169,6 +174,7 @@ wss.on('connection', socket => {
                 edits: Array.from(worldEdits.values()),
                 pigHealth: Array.from(pigHealth.entries()),
                 chests: Array.from(chestStates.entries()),
+                itemDrops: Array.from(itemDrops.values()),
                 players: Array.from(players.values())
                     .filter(other => other.id !== id)
                     .map(cleanPlayer),
@@ -259,6 +265,48 @@ wss.on('connection', socket => {
                 pigId: message.pigId,
                 health: nextHealth,
                 attackerId: player.id
+            });
+            return;
+        }
+
+        if (message.type === 'item_drop_request') {
+            const now = Date.now();
+            if (!ITEM_DROP_TYPES.has(message.itemType) || !Number.isInteger(message.count) ||
+                message.count < 1 || message.count > 64 || !isFinitePosition({ x: message.x, y: message.y, z: message.z }) ||
+                Math.hypot(message.x - player.position.x, message.z - player.position.z) > 8 ||
+                Math.abs(message.y - player.position.y) > 12 || player.health <= 0 || player.respawnAt ||
+                itemDrops.size >= MAX_ITEM_DROPS) {
+                send(socket, { type: 'item_drop_rejected', itemType: message.itemType, count: message.count });
+                return;
+            }
+            const drop = {
+                id: randomUUID(),
+                itemType: message.itemType,
+                count: message.count,
+                x: message.x,
+                y: message.y,
+                z: message.z,
+                pickupAvailableAt: now + 850
+            };
+            itemDrops.set(drop.id, drop);
+            broadcast({ type: 'item_drop_spawn', drop });
+            return;
+        }
+
+        if (message.type === 'item_pickup_request') {
+            if (typeof message.id !== 'string' || player.health <= 0 || player.respawnAt) return;
+            const drop = itemDrops.get(message.id);
+            if (!drop || Date.now() < drop.pickupAvailableAt) return;
+            // Horizontal proximity is checked against the server's latest player
+            // position. The clients independently simulate the same vertical fall.
+            if (Math.hypot(drop.x - player.position.x, drop.z - player.position.z) > 2.6) return;
+            itemDrops.delete(drop.id);
+            broadcast({
+                type: 'item_drop_removed',
+                id: drop.id,
+                pickerId: player.id,
+                itemType: drop.itemType,
+                count: drop.count
             });
             return;
         }
