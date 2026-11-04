@@ -15,7 +15,7 @@ const MAX_PLAYERS = 32;
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_EDITS = 100000;
 const MAX_HEALTH = 20;
-const PUNCH_DAMAGE = 1; // Half a heart per hit
+const PUNCH_DAMAGE = 1;
 const PUNCH_REACH = 3.2;
 const PUNCH_COOLDOWN_MS = 500;
 const HEALTH_REGEN_INTERVAL_MS = 4000;
@@ -31,6 +31,7 @@ const worldSeed = createSeed();
 const worldEdits = new Map();
 const players = new Map();
 const pigHealth = new Map();
+const chestStates = new Map();
 
 const server = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/') {
@@ -96,7 +97,7 @@ function validEdit(message) {
         message.x >= -HALF_WORLD && message.x < HALF_WORLD &&
         message.z >= -HALF_WORLD && message.z < HALF_WORLD &&
         message.y >= WORLD_BOTTOM && message.y <= 40 &&
-        [0, 1, 2, 3, 4, 5, 6].includes(message.block);
+        [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 20].includes(message.block);
 }
 
 function sendSync(socket) {
@@ -104,7 +105,8 @@ function sendSync(socket) {
         type: 'sync',
         seed: worldSeed,
         edits: Array.from(worldEdits.values()),
-        pigHealth: Array.from(pigHealth.entries())
+        pigHealth: Array.from(pigHealth.entries()),
+        chests: Array.from(chestStates.entries())
     });
 }
 
@@ -166,6 +168,7 @@ wss.on('connection', socket => {
                 health: player.health,
                 edits: Array.from(worldEdits.values()),
                 pigHealth: Array.from(pigHealth.entries()),
+                chests: Array.from(chestStates.entries()),
                 players: Array.from(players.values())
                     .filter(other => other.id !== id)
                     .map(cleanPlayer),
@@ -212,8 +215,6 @@ wss.on('connection', socket => {
             const verticalDistance = Math.abs(target.position.y - player.position.y);
             if (distance > PUNCH_REACH || verticalDistance > 2.4 || distance < 0.001) return;
 
-            // Use the yaw sent with the punch so a very recent camera turn
-            // is not rejected while waiting for the next periodic state update.
             const punchYaw = Number.isFinite(message.yaw) ? message.yaw : player.yaw;
             const forwardX = -Math.sin(punchYaw);
             const forwardZ = -Math.cos(punchYaw);
@@ -262,6 +263,26 @@ wss.on('connection', socket => {
             return;
         }
 
+        if (message.type === 'chest_update') {
+            if (typeof message.key !== 'string' || !/^-?\\d+,-?\\d+,-?\\d+$/.test(message.key) ||
+                !Array.isArray(message.slots) || message.slots.length !== 27) return;
+            const [x, y, z] = message.key.split(',').map(Number);
+            if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z) ||
+                x < -HALF_WORLD || x >= HALF_WORLD || z < -HALF_WORLD || z >= HALF_WORLD ||
+                y < WORLD_BOTTOM || y > 40 || worldEdits.get(message.key)?.block !== 13 &&
+                !chestStates.has(message.key)) return;
+            const allowedTypes = new Set([1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 24, 25,
+                30, 31, 32, 33, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]);
+            const slots = message.slots.map(stack => {
+                if (!stack || !Number.isInteger(stack.type) || !allowedTypes.has(stack.type) ||
+                    !Number.isInteger(stack.count) || stack.count < 1 || stack.count > 64) return null;
+                return { type: stack.type, count: stack.count };
+            });
+            chestStates.set(message.key, slots);
+            broadcast({ type: 'chest_update', key: message.key, slots });
+            return;
+        }
+
         if (message.type === 'block_edit') {
             const now = Date.now();
             if (now - socket.lastEditAt < 35 || !validEdit(message)) {
@@ -281,6 +302,7 @@ wss.on('connection', socket => {
                 block: message.block
             };
             worldEdits.set(key, edit);
+            if (message.block === 0) chestStates.delete(key);
             broadcast({ type: 'block_edit', edit });
             return;
         }
