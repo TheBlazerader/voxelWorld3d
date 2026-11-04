@@ -31,11 +31,12 @@ const worldSeed = createSeed();
 const worldEdits = new Map();
 const players = new Map();
 const pigHealth = new Map();
+const cowHealth = new Map();
 const chestStates = new Map();
 const itemDrops = new Map();
 const MAX_ITEM_DROPS = 2000;
 const ITEM_DROP_TYPES = new Set([1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 24, 25,
-    30, 31, 32, 33, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]);
+    30, 31, 32, 33, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]);
 
 const server = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/') {
@@ -110,6 +111,7 @@ function sendSync(socket) {
         seed: worldSeed,
         edits: Array.from(worldEdits.values()),
         pigHealth: Array.from(pigHealth.entries()),
+        cowHealth: Array.from(cowHealth.entries()),
         chests: Array.from(chestStates.entries()),
         itemDrops: Array.from(itemDrops.values())
     });
@@ -173,6 +175,7 @@ wss.on('connection', socket => {
                 health: player.health,
                 edits: Array.from(worldEdits.values()),
                 pigHealth: Array.from(pigHealth.entries()),
+                cowHealth: Array.from(cowHealth.entries()),
                 chests: Array.from(chestStates.entries()),
                 itemDrops: Array.from(itemDrops.values()),
                 players: Array.from(players.values())
@@ -269,13 +272,44 @@ wss.on('connection', socket => {
             return;
         }
 
+        if (message.type === 'cow_punch') {
+            const now = Date.now();
+            if (player.health <= 0 || player.respawnAt || now - player.lastPunchAt < PUNCH_COOLDOWN_MS) return;
+            if (typeof message.cowId !== 'string') return;
+            const match = /^cow-(\d+)$/.exec(message.cowId);
+            if (!match || Number(match[1]) < 0 || Number(match[1]) >= 10) return;
+            const position = message.position;
+            if (!isFinitePosition(position)) return;
+            const dx = position.x - player.position.x;
+            const dz = position.z - player.position.z;
+            const horizontalDistance = Math.hypot(dx, dz);
+            const verticalDistance = Math.abs((player.position.y - 1.7) - (position.y + 0.8));
+            if (horizontalDistance > PUNCH_REACH + 0.7 || verticalDistance > 3.0) return;
+            const currentHealth = cowHealth.has(message.cowId) ? cowHealth.get(message.cowId) : 10;
+            if (currentHealth <= 0) return;
+            player.lastPunchAt = now;
+            const nextHealth = Math.max(0, currentHealth - PIG_PUNCH_DAMAGE);
+            cowHealth.set(message.cowId, nextHealth);
+            broadcast({ type: 'cow_hit', cowId: message.cowId, health: nextHealth, attackerId: player.id });
+            return;
+        }
+
+        if (message.type === 'eat_food') {
+            if (!Number.isInteger(message.amount) || ![2, 4].includes(message.amount) || player.health <= 0 || player.respawnAt) return;
+            player.health = Math.min(MAX_HEALTH, player.health + message.amount);
+            player.lastHealthRegenAt = Date.now();
+            send(socket, { type: 'health_update', id: player.id, health: player.health, attackerId: null });
+            return;
+        }
+
         if (message.type === 'item_drop_request') {
             const now = Date.now();
             if (!ITEM_DROP_TYPES.has(message.itemType) || !Number.isInteger(message.count) ||
                 message.count < 1 || message.count > 64 || !isFinitePosition({ x: message.x, y: message.y, z: message.z }) ||
                 Math.hypot(message.x - player.position.x, message.z - player.position.z) > 8 ||
                 Math.abs(message.y - player.position.y) > 12 || player.health <= 0 || player.respawnAt ||
-                itemDrops.size >= MAX_ITEM_DROPS) {
+                !Number.isFinite(message.vx || 0) || !Number.isFinite(message.vz || 0) ||
+                Math.abs(message.vx || 0) > 6 || Math.abs(message.vz || 0) > 6 || itemDrops.size >= MAX_ITEM_DROPS) {
                 send(socket, { type: 'item_drop_rejected', itemType: message.itemType, count: message.count });
                 return;
             }
@@ -286,6 +320,9 @@ wss.on('connection', socket => {
                 x: message.x,
                 y: message.y,
                 z: message.z,
+                vx: Number.isFinite(message.vx) ? message.vx : 0,
+                vz: Number.isFinite(message.vz) ? message.vz : 0,
+                createdAt: now,
                 pickupAvailableAt: now + 850
             };
             itemDrops.set(drop.id, drop);
@@ -297,9 +334,12 @@ wss.on('connection', socket => {
             if (typeof message.id !== 'string' || player.health <= 0 || player.respawnAt) return;
             const drop = itemDrops.get(message.id);
             if (!drop || Date.now() < drop.pickupAvailableAt) return;
-            // Horizontal proximity is checked against the server's latest player
-            // position. The clients independently simulate the same vertical fall.
-            if (Math.hypot(drop.x - player.position.x, drop.z - player.position.z) > 2.6) return;
+            // Project the same short, damped throw used by clients before checking pickup range.
+            const elapsed = Math.max(0, (Date.now() - (drop.createdAt || Date.now())) / 1000);
+            const travel = (1 - Math.exp(-3 * elapsed)) / 3;
+            const dropX = drop.x + (drop.vx || 0) * travel;
+            const dropZ = drop.z + (drop.vz || 0) * travel;
+            if (Math.hypot(dropX - player.position.x, dropZ - player.position.z) > 2.6) return;
             itemDrops.delete(drop.id);
             broadcast({
                 type: 'item_drop_removed',
@@ -320,7 +360,7 @@ wss.on('connection', socket => {
                 y < WORLD_BOTTOM || y > 40 || worldEdits.get(message.key)?.block !== 13 &&
                 !chestStates.has(message.key)) return;
             const allowedTypes = new Set([1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 24, 25,
-                30, 31, 32, 33, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]);
+                30, 31, 32, 33, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]);
             const slots = message.slots.map(stack => {
                 if (!stack || !Number.isInteger(stack.type) || !allowedTypes.has(stack.type) ||
                     !Number.isInteger(stack.count) || stack.count < 1 || stack.count > 64) return null;
