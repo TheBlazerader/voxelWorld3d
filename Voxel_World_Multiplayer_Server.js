@@ -96,13 +96,18 @@ function isFinitePosition(position) {
 }
 
 function validEdit(message) {
-    return Number.isInteger(message.x) &&
+    if (!(Number.isInteger(message.x) &&
         Number.isInteger(message.y) &&
         Number.isInteger(message.z) &&
         message.x >= -HALF_WORLD && message.x < HALF_WORLD &&
         message.z >= -HALF_WORLD && message.z < HALF_WORLD &&
         message.y >= WORLD_BOTTOM && message.y <= 40 &&
-        [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 20].includes(message.block);
+        [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 20].includes(message.block))) return false;
+    if (message.block === 3 && message.waterLevel !== undefined &&
+        (!Number.isInteger(message.waterLevel) || message.waterLevel < 1 || message.waterLevel > 8)) return false;
+    if (message.waterParent != null &&
+        (typeof message.waterParent !== 'string' || !/^-?\d+,-?\d+,-?\d+$/.test(message.waterParent))) return false;
+    return true;
 }
 
 function sendSync(socket) {
@@ -405,6 +410,10 @@ wss.on('connection', socket => {
                 z: message.z,
                 block: message.block
             };
+            if (message.block === 3) {
+                edit.waterLevel = Number.isInteger(message.waterLevel) ? message.waterLevel : 8;
+                if (typeof message.waterParent === 'string') edit.waterParent = message.waterParent;
+            }
             worldEdits.set(key, edit);
             if (message.block === 0) chestStates.delete(key);
             broadcast({ type: 'block_edit', edit });
